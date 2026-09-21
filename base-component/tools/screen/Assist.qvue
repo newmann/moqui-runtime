@@ -1,0 +1,1069 @@
+<template>
+<div class="assist-root">
+    <div class="row items-center q-mb-sm q-col-gutter-sm">
+        <div class="col-auto">
+            <q-btn-toggle dense unelevated v-model="writeMode" :options="writeModeOptions"
+                          toggle-color="primary" @input="persistWriteMode"></q-btn-toggle>
+        </div>
+        <div class="col-auto">
+            <q-toggle dense v-model="forceSkillUse" label="Force Skill Use"
+                      @input="persistForceSkillUse"></q-toggle>
+        </div>
+        <div class="col text-caption text-grey-7">{{ writeModeHint }}</div>
+        <div class="col-auto">
+            <q-btn dense outline no-caps :label="chatOnLeft ? 'Chat | Screen' : 'Screen | Chat'"
+                   @click="toggleSide"></q-btn>
+        </div>
+        <div class="col-auto">
+            <q-btn dense outline no-caps label="New session" @click="newSession"></q-btn>
+        </div>
+        <div class="col-auto">
+            <q-btn dense outline no-caps color="negative" label="Cancel" :disable="!streaming" @click="cancelTurn"></q-btn>
+        </div>
+    </div>
+    <q-splitter v-if="!isMobile" v-model="splitPct" :reverse="!chatOnLeft" style="height: calc(100vh - 140px)">
+        <template v-slot:before>
+            <div class="assist-pane assist-chat q-pa-sm column" style="height:100%">
+                <div class="col overflow-auto" style="min-height:0">
+                    <div v-for="(m, i) in messages" :key="i" class="q-mb-sm">
+                        <div v-if="m.role!=='tool' && m.role!=='done'" class="text-caption text-grey-7">{{ m.role }}<span v-if="m.name"> {{ m.name }}</span></div>
+                        <div v-if="m.role==='tool'" class="text-caption">{{ m.kind }} {{ m.name }}<span v-if="toolSummary(m)"> — {{ toolSummary(m) }}</span></div>
+                        <div v-else-if="m.role==='done'" class="text-caption text-grey-7">{{ m.content }}</div>
+                        <div v-else style="white-space:pre-wrap">{{ m.content }}</div>
+                    </div>
+                </div>
+                <div class="col-auto q-pt-sm">
+                    <q-input id="assist-composer" outlined autogrow v-model="composer" placeholder="Describe what you need"
+                             @keyup.enter.exact.prevent="send" :disable="streaming">
+                        <template v-slot:append>
+                            <q-btn v-if="speechSupported" flat round dense :icon="recognizing ? 'mic' : 'mic_none'"
+                                   @click="toggleMic"></q-btn>
+                            <q-btn id="assist-send" flat round dense icon="send" :disable="streaming || !composer"
+                                   @click="send"></q-btn>
+                        </template>
+                    </q-input>
+                </div>
+            </div>
+        </template>
+        <template v-slot:after>
+            <div class="assist-pane assist-canvas q-pa-sm column" style="height:100%">
+                <div v-if="!schema" class="text-grey-7 q-pa-md">
+                    Describe what you need. Assist will build a screen here.</div>
+                <div v-else class="col overflow-auto">
+                    <div class="text-h6">{{ schema.title }}</div>
+                    <div class="text-body2 q-mb-md">{{ schema.instruction }}</div>
+                    <div v-if="(schema.actions||[]).length" class="q-mb-md">
+                        <div class="text-subtitle2">On submit</div>
+                        <ul class="q-pl-md">
+                            <li v-for="a in schema.actions" :key="a.id">
+                                {{ a.label || a.id }} — {{ a.method }} {{ a.path }}</li>
+                        </ul>
+                    </div>
+                    <div v-if="showOpenUi" class="q-mb-md">
+                        <assist-openui :lang="schema.lang" :streaming="streaming" :mode="writeMode"
+                                       :csrf="csrf" :app-root="($root && $root.appRootPath) || ''"
+                                       :initial-state="fieldValues"
+                                       @action="onOpenUiAction" @state-update="onOpenUiState"
+                                       @error="onOpenUiError"></assist-openui>
+                    </div>
+                    <div v-if="showVueSfc" class="q-mb-md">
+                        <component :is="vueSfcComp" :key="vueSfcKey"
+                                   :values="fieldValues" :schema="schema" :mode="writeMode"
+                                   @input="onSfcInput" @submit="onSfcSubmit" @cancel="newSession"></component>
+                    </div>
+                    <div v-else-if="schema.kind==='vue-sfc' && !vueSfcFailed" class="text-grey-7 q-mb-md">
+                        Loading generated screen…</div>
+                    <div v-if="showFormWidgets && (schema.columns||[]).length" class="q-mb-md">
+                        <table class="q-table">
+                            <thead><tr>
+                                <th v-for="c in schema.columns" :key="c.name">{{ c.label || c.name }}</th>
+                            </tr></thead>
+                            <tbody>
+                                <tr v-for="(row, ri) in (schema.rows||[])" :key="ri">
+                                    <td v-for="c in schema.columns" :key="c.name">{{ row[c.name] }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div v-if="showFormWidgets" v-for="f in visibleFields" :key="f.name" class="q-mb-sm" :data-field="f.name">
+                        <m-text-line v-if="f.widget==='text-line' || f.widget==='hidden'" dense outlined
+                                     :label="f.label || f.name" :value="fieldValues[f.name]"
+                                     @input="onFieldInput(f.name, $event)"
+                                     :type="f.widget==='hidden' ? 'hidden' : 'text'"
+                                     :name="f.name"
+                                     :tooltip="f.help"></m-text-line>
+                        <q-input v-else-if="f.widget==='text-area'" dense outlined autogrow type="textarea"
+                                 stack-label :label="f.label || f.name" :value="fieldValues[f.name]"
+                                 @input="onFieldInput(f.name, $event)" :hint="f.help" :name="f.name"></q-input>
+                        <q-select v-else-if="f.widget==='drop-down' && (f.options||[]).length" dense outlined emit-value map-options
+                                  :options="f.options || []" option-value="key" option-label="text"
+                                  stack-label :label="f.label || f.name" :value="fieldValues[f.name]"
+                                  @input="onFieldInput(f.name, $event)"></q-select>
+                        <m-text-line v-else-if="f.widget==='drop-down'" dense outlined
+                                     :label="f.label || f.name" :value="fieldValues[f.name]"
+                                     @input="onFieldInput(f.name, $event)" :name="f.name"
+                                     :tooltip="f.help"></m-text-line>
+                        <m-date-time v-else-if="f.widget==='date-time'" :name="f.name" :label="f.label || f.name"
+                                     :type="f.widgetType || 'date-time'" :value="fieldValues[f.name]"
+                                     @input="onFieldInput(f.name, $event)"></m-date-time>
+                        <q-checkbox v-else-if="f.widget==='check'" :label="f.label || f.name"
+                                    :value="fieldValues[f.name]"
+                                    @input="onFieldInput(f.name, $event)"></q-checkbox>
+                        <div v-else class="text-body2"><span class="text-grey-7">{{ f.label || f.name }}:</span> {{ fieldValues[f.name] }}</div>
+                    </div>
+                    <div v-if="showParentSubmit" class="q-gutter-sm q-mt-md">
+                        <q-btn id="assist-submit" unelevated color="primary" no-caps
+                               :label="primaryLabel" :disable="!canSubmitScript || streaming"
+                               @click="submitCanvas(primaryId)"></q-btn>
+                        <q-btn outline no-caps :label="schema.cancelLabel || 'Cancel'"
+                               @click="newSession"></q-btn>
+                    </div>
+                    <div v-else class="q-gutter-sm q-mt-md">
+                        <q-btn outline no-caps :label="schema.cancelLabel || 'Cancel'"
+                               @click="newSession"></q-btn>
+                    </div>
+                </div>
+            </div>
+        </template>
+    </q-splitter>
+    <q-tabs v-if="isMobile" v-model="mobileTab" dense class="text-primary">
+        <q-tab name="chat" label="Chat"></q-tab>
+        <q-tab name="screen" label="Screen"></q-tab>
+    </q-tabs>
+    <q-tab-panels v-if="isMobile" v-model="mobileTab">
+        <q-tab-panel name="chat" class="q-pa-sm">Use desktop split view for Assist, or rotate to landscape.</q-tab-panel>
+        <q-tab-panel name="screen" class="q-pa-sm">Use desktop split view for Assist, or rotate to landscape.</q-tab-panel>
+    </q-tab-panels>
+</div>
+</template>
+<script>
+/* Assist Universal Screen. Canvas kinds: form spec, vue-sfc (httpVueLoader.parse).
+ * FUTURE: screen-xml POST to a compile/render transition (server round-trip).
+ */
+function parseSseChunk(buffer, onEvent) {
+    var parts = buffer.split('\n\n');
+    var rest = parts.pop();
+    for (var i = 0; i < parts.length; i++) {
+        var block = parts[i];
+        if (!block || !block.trim()) continue;
+        var event = 'message', data = '';
+        var lines = block.split('\n');
+        for (var j = 0; j < lines.length; j++) {
+            var line = lines[j];
+            if (line.indexOf('event:') === 0) event = line.slice(6).trim();
+            else if (line.indexOf('data:') === 0) data += line.slice(5).trim();
+        }
+        var parsed = data;
+        try { parsed = JSON.parse(data); } catch (e) { /* keep string */ }
+        onEvent(event, parsed);
+    }
+    return rest;
+}
+var HTML_ACTION_ERROR = 'HTML screens are not valid tool results. Use /apps (not /qapps). GET {screen}/actions for screen JSON, GET {screen}/actions/{formListName} for form-list rows (browse jsonPath), or POST {screen}/{transitionName} for a named transition from browse (not /actions/{transition})';
+function isHtmlBody(text, contentType) {
+    if (contentType && String(contentType).toLowerCase().indexOf('html') >= 0) return true;
+    if (text == null) return false;
+    var t = String(text).trim();
+    if (!t) return false;
+    var head = t.length > 32 ? t.slice(0, 32).toLowerCase() : t.toLowerCase();
+    return head.indexOf('<!doctype') === 0 || head.indexOf('<html') === 0
+        || head.indexOf('<body') === 0 || head.indexOf('<head') === 0;
+}
+function validateActionPath(path) {
+    if (!path || path.charAt(0) !== '/') return 'path must start with /';
+    if (path.indexOf('://') >= 0 || path.indexOf('//') === 0) return 'path must not contain a host';
+    if (path.indexOf('..') >= 0) return 'path must not contain ..';
+    return null;
+}
+function unescapeHtml(s) {
+    if (s == null || s === '') return s;
+    return String(s).replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+}
+function scalarValue(v) {
+    if (v == null) return '';
+    if (typeof v === 'object') {
+        if (v.value != null && typeof v.value !== 'object') return unescapeHtml(String(v.value));
+        var keys = Object.keys(v);
+        if (keys.length === 1 && typeof v[keys[0]] !== 'object') return unescapeHtml(String(v[keys[0]]));
+        return '';
+    }
+    return unescapeHtml(String(v));
+}
+function subst(str, bag) {
+    if (!str || !bag) return str;
+    return String(str).replace(/\{([a-zA-Z0-9_.]+)\}/g, function(m, k) {
+        return bag[k] != null ? bag[k] : m;
+    });
+}
+function stripSfcFences(s) {
+    if (s == null) return s;
+    var t = String(s).trim();
+    if (t.indexOf('```') === 0) {
+        var nl = t.indexOf('\n');
+        if (nl > 0) t = t.slice(nl + 1);
+        if (t.slice(-3) === '```') t = t.slice(0, -3);
+        t = t.trim();
+    }
+    return t;
+}
+function startsWithTag(s, tag) {
+    if (!s) return false;
+    var t = String(s).trim();
+    return t.charAt(0) === '<' && t.slice(1, 1 + tag.length).toLowerCase() === tag;
+}
+function assembleSfc(schema) {
+    if (!schema) return '';
+    if (schema.sfc) return stripSfcFences(schema.sfc);
+    var template = schema.template, script = schema.script, style = schema.style;
+    if (!template && !script && !style) return '';
+    var parts = [];
+    if (template) {
+        var t = String(template).trim();
+        parts.push(startsWithTag(t, 'template') ? t : '<template>\n' + template + '\n</template>');
+    }
+    var scriptClose = '<' + '/script>';
+    if (script) {
+        var sc = String(script).trim();
+        parts.push(startsWithTag(sc, 'script') ? sc : '<script>\n' + script + '\n' + scriptClose);
+    } else parts.push('<script>\nmodule.exports = {}\n' + scriptClose);
+    if (style) {
+        var st = String(style).trim();
+        parts.push(startsWithTag(st, 'style') ? st : '<style>\n' + style + '\n</style>');
+    }
+    return parts.join('\n');
+}
+function hashString(s) {
+    var h = 0;
+    if (!s) return '0';
+    for (var i = 0; i < s.length; i++) h = ((h << 5) - h) + s.charCodeAt(i) | 0;
+    return String(h);
+}
+function isWriteUiArgs(args) {
+    return !!(args && (args.fields || args.columns || args.sfc || args.template || args.lang
+            || args.kind === 'form' || args.kind === 'vue-sfc' || args.kind === 'openui'));
+}
+function extractOpenUiLang(partialArgs) {
+    if (!partialArgs) return null;
+    if (typeof partialArgs === 'object' && partialArgs.lang) return String(partialArgs.lang);
+    var s = String(partialArgs);
+    try {
+        var parsed = JSON.parse(s);
+        if (parsed && parsed.lang) return String(parsed.lang);
+    } catch (e) { /* incomplete JSON */ }
+    var m = /"lang"\s*:\s*"/.exec(s);
+    if (!m) return null;
+    var i = m.index + m[0].length, out = [];
+    for (; i < s.length; i++) {
+        var c = s.charAt(i);
+        if (c === '\\' && i + 1 < s.length) {
+            var n = s.charAt(++i);
+            if (n === 'n') out.push('\n');
+            else if (n === 't') out.push('\t');
+            else if (n === '"') out.push('"');
+            else if (n === '\\') out.push('\\');
+            else out.push(n);
+        } else if (c === '"') break;
+        else out.push(c);
+    }
+    return out.join('');
+}
+function loadScriptOnce(src) {
+    return new Promise(function(resolve, reject) {
+        if (document.querySelector('script[data-assist-src="' + src + '"]') ||
+                document.querySelector('script[src^="' + src + '"]')) {
+            resolve(); return;
+        }
+        var s = document.createElement('script');
+        s.src = src;
+        s.async = false;
+        s.setAttribute('data-assist-src', src);
+        s.onload = function() { resolve(); };
+        s.onerror = function() { reject(new Error('Failed to load ' + src)); };
+        document.head.appendChild(s);
+    });
+}
+function sensitiveArgKey(k) {
+    if (!k) return false;
+    var l = String(k).toLowerCase();
+    if (l === 'token' || l === 'sfc' || l === 'template' || l === 'script' || l === 'style' || l === 'lang') return true;
+    return /password|secret|api[_-]?key|authorization|ssn|creditcard/.test(l);
+}
+function formatArgsFallback(name, args) {
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return '';
+    var parts = [];
+    if (name === 'browse') {
+        if (args.path) parts.push('path=' + args.path);
+        if (args.match) parts.push('match=' + args.match);
+        if (args.depth != null && args.depth !== 1) parts.push('depth=' + args.depth);
+        if (args.detail) parts.push('detail=true');
+        return parts.join(' ');
+    }
+    if (name === 'request') {
+        return String(args.method || '?') + ' ' + String(args.path || '?');
+    }
+    if (name === 'run_service') {
+        if (args.serviceName) parts.push(args.serviceName);
+        var params = args.parameters;
+        if (params && typeof params === 'object' && !Array.isArray(params)) {
+            Object.keys(params).forEach(function(k) {
+                if (sensitiveArgKey(k)) parts.push(k + '=***');
+                else if (params[k] != null && typeof params[k] !== 'object') parts.push(k + '=' + params[k]);
+            });
+        }
+        return parts.join(' ');
+    }
+    if (name === 'find_skill') {
+        if (args.query) parts.push('query=' + args.query);
+        if (args.select) parts.push('select=' + args.select);
+        if (args.limit != null) parts.push('limit=' + args.limit);
+        return parts.join(' ');
+    }
+    if (name === 'enter_sim') {
+        if (args.goal) parts.push('goal=' + args.goal);
+        return parts.join(' ');
+    }
+    if (name === 'write_ui') {
+        parts.push('kind=' + (args.kind || 'form'));
+        if (args.title) parts.push('title=' + args.title);
+        if (args.fields && args.fields.length) parts.push('fields=' + args.fields.length);
+        return parts.join(' ');
+    }
+    Object.keys(args).forEach(function(k) {
+        if (sensitiveArgKey(k) || parts.length >= 6) return;
+        var v = args[k];
+        if (v == null || typeof v === 'object') return;
+        parts.push(k + '=' + v);
+    });
+    return parts.join(' ');
+}
+function formatResultFallback(name, content) {
+    if (content == null) return '';
+    if (typeof content === 'string') return content.length > 80 ? content.slice(0, 80) + '...' : content;
+    if (typeof content !== 'object') return String(content);
+    if (content.error) return 'error=' + content.error;
+    if (name === 'browse' && content.children) return (content.children.length || 0) + ' children';
+    if (name === 'request' && content.status != null) return 'status=' + content.status;
+    if (name === 'run_service') return content.ok ? 'ok' : '';
+    if (name === 'find_skill') {
+        if (content.selected && content.selected.name) return 'selected=' + content.selected.name;
+        if (content.skills) {
+            if (!content.skills.length) return 'none';
+            return content.skills.map(function(s) { return s && s.name; }).filter(Boolean).slice(0, 4).join(',');
+        }
+    }
+    if (name === 'enter_sim') {
+        if (content.proposedSkillName) {
+            var simParts = ['proposed=' + content.proposedSkillName];
+            if (content.proposedSkillId) simParts.push('skillId=' + content.proposedSkillId);
+            if (content.selected === false) simParts.push('not selected');
+            return simParts.join(' ');
+        }
+    }
+    if (name === 'write_ui' && content.submitted != null) return content.submitted ? 'submitted' : 'not submitted';
+    if (content.ok) return 'ok';
+    if (content.status != null) return 'status=' + content.status;
+    return '';
+}
+function assistNotify(message, kind) {
+    if (!message) return;
+    var type = kind === 'error' || kind === 'negative' ? 'danger'
+        : kind === 'positive' || kind === 'success' ? 'success'
+        : (kind || 'warning');
+    if (window.moqui && moqui.notifyMessages) {
+        if (type === 'danger') moqui.notifyMessages(null, String(message));
+        else moqui.notifyMessages([{ type: type, message: String(message) }]);
+        return;
+    }
+    var q = window.moqui && moqui.webrootVue && moqui.webrootVue.$q;
+    if (q && q.notify) {
+        var qType = type === 'danger' ? 'negative' : type === 'success' ? 'positive' : type;
+        var base = qType === 'negative' && moqui.notifyOptsError ? moqui.notifyOptsError
+            : qType === 'info' && moqui.notifyOptsInfo ? moqui.notifyOptsInfo
+            : qType === 'positive' && moqui.notifyOpts ? moqui.notifyOpts
+            : { timeout: 10000, type: 'warning' };
+        q.notify($.extend({}, base, { type: qType, message: String(message) }));
+        if (moqui.webrootVue.addNotify) moqui.webrootVue.addNotify(String(message), qType);
+    }
+}
+function formatDoneLine(data) {
+    if (!data) return '';
+    var parts = [];
+    if (data.yielded) parts.push('yielded');
+    else if (data.finishReason) parts.push(data.finishReason);
+    if (data.durationMs != null && data.durationMs !== '') parts.push(data.durationMs + 'ms');
+    var u = data.usage;
+    if (u && (u.promptTokens != null || u.completionTokens != null || u.totalTokens != null)) {
+        parts.push('tokens=' + (u.promptTokens != null ? u.promptTokens : '?') + '/'
+            + (u.completionTokens != null ? u.completionTokens : '?') + '/'
+            + (u.totalTokens != null ? u.totalTokens : '?'));
+    }
+    return parts.join(' ');
+}
+function ensureSfcProps(comp) {
+    if (!comp) return comp;
+    var base = {
+        values: { type: Object, 'default': function() { return {}; } },
+        schema: { type: Object },
+        mode: { type: String }
+    };
+    if (!comp.props) { comp.props = base; return comp; }
+    if (Array.isArray(comp.props)) {
+        ['values', 'schema', 'mode'].forEach(function(p) {
+            if (comp.props.indexOf(p) < 0) comp.props.push(p);
+        });
+        return comp;
+    }
+    if (!comp.props.values) comp.props.values = base.values;
+    if (!comp.props.schema) comp.props.schema = base.schema;
+    if (!comp.props.mode) comp.props.mode = base.mode;
+    return comp;
+}
+
+module.exports = {
+    data: function() {
+        return {
+            chatOnLeft: true, writeMode: 'script', forceSkillUse: false, splitPct: 40,
+            mobileTab: 'chat',
+            composer: '', streaming: false,
+            conversationId: null, canvasId: null,
+            messages: [], pendingToolCalls: [],
+            schema: null, fieldValues: {}, dirtyFields: {},
+            vueSfcComp: null, vueSfcKey: null, vueSfcGen: 0, vueSfcFailed: false,
+            speechSupported: false, recognizing: false,
+            recognition: null, abortCtl: null,
+            conversations: [], profileFlags: {}
+        };
+    },
+    computed: {
+        isMobile: function() {
+            return (window.innerWidth && window.innerWidth <= 600) ||
+                (window.Quasar && Quasar.Platform && Quasar.Platform.is && Quasar.Platform.is.mobile);
+        },
+        writeModeOptions: function() {
+            return [
+                { label: 'Script', value: 'script' },
+                { label: 'Agent', value: 'agent' }
+            ];
+        },
+        writeModeHint: function() {
+            var mode = this.writeMode === 'script'
+                ? 'This screen runs the listed actions when you click.'
+                : 'Assist runs the listed actions after you click.';
+            if (!this.forceSkillUse) return mode;
+            return mode + ' Force Skill Use: select a skill or enter sim before other tools.';
+        },
+        llmBase: function() {
+            var root = (this.$root && this.$root.appRootPath) || '';
+            return root + '/llm/v1';
+        },
+        csrf: function() { return (this.$root && this.$root.moquiSessionToken) || ''; },
+        canSubmitScript: function() {
+            if (this.schema && this.schema.kind === 'openui') return true;
+            var acts = this.schema && this.schema.actions;
+            return this.writeMode !== 'script' || (acts && acts.length);
+        },
+        showOpenUi: function() {
+            return !!(this.schema && this.schema.kind === 'openui' && this.schema.lang);
+        },
+        showParentSubmit: function() {
+            if (!this.schema) return false;
+            if (this.schema.kind === 'openui' && this.writeMode === 'script') return false;
+            return true;
+        },
+        visibleFields: function() {
+            var fields = (this.schema && this.schema.fields) || [];
+            return fields.filter(function(f) { return f && f.widget !== 'hidden'; });
+        },
+        primaryLabel: function() {
+            var s = this.schema || {};
+            var acts = s.actions || [];
+            var p = acts.filter(function(a) { return a.primary; })[0];
+            return unescapeHtml((p && p.label) || s.submitLabel || 'Submit');
+        },
+        primaryId: function() {
+            var acts = (this.schema && this.schema.actions) || [];
+            var p = acts.filter(function(a) { return a.primary; })[0];
+            return (p && p.id) || (acts[0] && acts[0].id) || 'submit';
+        },
+        showVueSfc: function() {
+            return !!(this.vueSfcComp && this.schema && this.schema.kind === 'vue-sfc');
+        },
+        showFormWidgets: function() {
+            if (!this.schema || this.showVueSfc || this.showOpenUi) return false;
+            if (this.schema.kind === 'vue-sfc') return this.vueSfcFailed;
+            if (this.schema.kind === 'openui') return false;
+            return true;
+        }
+    },
+    methods: {
+        persistPref: function(key, value) {
+            $.ajax({ type: 'POST', url: (this.$root.appRootPath + '/apps/setPreference'),
+                data: { moquiSessionToken: this.csrf, preferenceKey: key, preferenceValue: value },
+                error: moqui.handleAjaxError });
+        },
+        persistWriteMode: function() { this.persistPref('ASSIST_WRITE_MODE', this.writeMode); },
+        persistForceSkillUse: function() {
+            this.persistPref('ASSIST_FORCE_SKILL_USE', this.forceSkillUse ? 'true' : 'false');
+        },
+        toggleSide: function() {
+            this.chatOnLeft = !this.chatOnLeft;
+            this.persistPref('ASSIST_CHAT_SIDE', this.chatOnLeft ? 'left' : 'right');
+        },
+        newSession: function() {
+            this.cancelTurn();
+            this.conversationId = null;
+            this.canvasId = 'c' + Date.now();
+            this.messages = [];
+            this.pendingToolCalls = [];
+            this.schema = null;
+            this.fieldValues = {};
+            this.dirtyFields = {};
+            this.vueSfcComp = null;
+            this.vueSfcKey = null;
+            this.vueSfcFailed = false;
+            this.vueSfcGen = (this.vueSfcGen || 0) + 1;
+        },
+        loadPrefs: function() {
+            var vm = this;
+            $.ajax({ type: 'GET', url: (this.$root.appRootPath + '/apps/getPreferences'),
+                data: { keyRegexp: 'ASSIST_' }, dataType: 'json',
+                success: function(prefs) {
+                    if (!prefs) return;
+                    if (prefs.ASSIST_CHAT_SIDE === 'right') vm.chatOnLeft = false;
+                    if (prefs.ASSIST_WRITE_MODE === 'agent' || prefs.ASSIST_WRITE_MODE === 'script')
+                        vm.writeMode = prefs.ASSIST_WRITE_MODE;
+                    if (prefs.ASSIST_FORCE_SKILL_USE === 'true') vm.forceSkillUse = true;
+                    if (prefs.ASSIST_FORCE_SKILL_USE === 'false') vm.forceSkillUse = false;
+                } });
+        },
+        loadProfiles: function() {
+            var vm = this;
+            fetch(this.llmBase + '/profiles', { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+                .then(function(r) { return r.json(); })
+                .then(function(body) {
+                    var list = (body && body.profiles) || [];
+                    var assist = list.filter(function(p) { return p.name === 'assist'; })[0] || list[0];
+                    vm.profileFlags = assist || {};
+                    if (assist && assist.allowUnprefixedRequest === false && assist.allowBrowse === false)
+                        assistNotify('Assist profile tools are limited; browse/request may be unavailable.', 'warning');
+                }).catch(function() { /* ignore */ });
+        },
+        loadConversations: function() {
+            var vm = this;
+            fetch(this.llmBase + '/conversations?profile=assist&purpose=assist',
+                { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+                .then(function(r) { return r.json(); })
+                .then(function(body) { vm.conversations = (body && body.conversations) || []; })
+                .catch(function() { vm.conversations = []; });
+        },
+        send: function() {
+            var text = (this.composer || '').trim();
+            if (!text || this.streaming) return;
+            this.composer = '';
+            this.messages.push({ role: 'user', content: text });
+            if (this.pendingToolCalls.length) this.resumeChat(text);
+            else this.chat(text);
+        },
+        toolNames: function() { return ['find_skill', 'enter_sim', 'browse', 'request', 'write_ui', 'run_service']; },
+        headers: function(stream) {
+            var h = { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf, Accept: stream ? 'text/event-stream' : 'application/json' };
+            return h;
+        },
+        chat: function(text) {
+            var body = { profile: 'assist', purpose: 'assist', canvasId: this.canvasId,
+                user: text, tools: this.toolNames(), stream: true, forceSkillUse: !!this.forceSkillUse };
+            if (this.conversationId) body.conversationId = this.conversationId;
+            this.runSse(this.llmBase + '/chat', body);
+        },
+        resumeChat: function(text) {
+            var pending = this.pendingToolCalls[0];
+            if (!pending) { this.chat(text); return; }
+            var content = this.writeUiResult(false, null);
+            content.userMessage = text;
+            var body = { profile: 'assist', tools: this.toolNames(), user: text, stream: true,
+                forceSkillUse: !!this.forceSkillUse,
+                toolResults: [{ id: pending.id, name: pending.name || 'write_ui', content: content }] };
+            this.runSse(this.llmBase + '/chat/' + encodeURIComponent(this.conversationId) + '/resume', body);
+        },
+        writeUiResult: function(submitted, button) {
+            return {
+                submitted: !!submitted,
+                mode: this.writeMode,
+                button: button || null,
+                values: Object.assign({}, this.fieldValues),
+                actions: (this.schema && this.schema.actions) || [],
+                canvas: this.currentCanvas()
+            };
+        },
+        currentCanvas: function() {
+            var schema = this.schema ? JSON.parse(JSON.stringify(this.schema)) : null;
+            if (!schema) return null;
+            var vals = this.fieldValues;
+            var fields = schema.fields || [];
+            for (var i = 0; i < fields.length; i++) {
+                var n = fields[i].name;
+                if (n && Object.prototype.hasOwnProperty.call(vals, n)) fields[i].defaultValue = vals[n];
+            }
+            return schema;
+        },
+        applySchema: function(schema) {
+            if (!schema) return;
+            var prevDirty = Object.assign({}, this.dirtyFields);
+            var prevVals = Object.assign({}, this.fieldValues);
+            schema.title = unescapeHtml(schema.title);
+            schema.instruction = unescapeHtml(schema.instruction);
+            schema.submitLabel = unescapeHtml(schema.submitLabel);
+            var acts = schema.actions || [];
+            for (var ai = 0; ai < acts.length; ai++) if (acts[ai] && acts[ai].label)
+                acts[ai].label = unescapeHtml(acts[ai].label);
+            var flds = schema.fields || [];
+            for (var fi = 0; fi < flds.length; fi++) if (flds[fi] && flds[fi].label)
+                flds[fi].label = unescapeHtml(flds[fi].label);
+            this.schema = schema;
+            if (schema.sfcError) assistNotify(schema.sfcError, 'error');
+            var next = {};
+            var fields = schema.fields || [];
+            for (var i = 0; i < fields.length; i++) {
+                var f = fields[i];
+                if (!f || !f.name) continue;
+                if (prevDirty[f.name]) next[f.name] = prevVals[f.name];
+                else next[f.name] = scalarValue(f.defaultValue);
+            }
+            Object.keys(prevVals).forEach(function(k) {
+                if (!Object.prototype.hasOwnProperty.call(next, k)) next[k] = prevVals[k];
+            });
+            this.fieldValues = next;
+            this.dirtyFields = prevDirty;
+        },
+        applyYield: function(args) {
+            if (!args) return;
+            this.applySchema(args);
+            if (args.kind === 'openui') {
+                this.vueSfcGen = (this.vueSfcGen || 0) + 1;
+                this.vueSfcComp = null;
+                this.vueSfcKey = null;
+                this.vueSfcFailed = false;
+                this.loadOpenUi();
+            } else if (args.kind === 'vue-sfc') this.loadVueSfc(args);
+            else {
+                this.vueSfcGen = (this.vueSfcGen || 0) + 1;
+                this.vueSfcComp = null;
+                this.vueSfcKey = null;
+                this.vueSfcFailed = false;
+            }
+        },
+        loadOpenUi: function() {
+            if (window.OpenUILang && window.AssistOpenUiReady) return Promise.resolve();
+            var root = (this.$root && this.$root.appRootPath) || '';
+            var files = [
+                root + '/js/assist/lang-core.umd.min.js',
+                root + '/js/assist/AssistOpenUiLibrary.js',
+                root + '/js/assist/AssistOpenUi.js'
+            ];
+            var chain = Promise.resolve();
+            files.forEach(function(src) {
+                chain = chain.then(function() { return loadScriptOnce(src); });
+            });
+            return chain.catch(function(err) {
+                assistNotify((err && err.message) || String(err), 'error');
+            });
+        },
+        onOpenUiState: function(snap) {
+            if (!snap || typeof snap !== 'object') return;
+            var next = Object.assign({}, this.fieldValues);
+            Object.keys(snap).forEach(function(k) {
+                var v = snap[k];
+                if (v && typeof v === 'object' && !Array.isArray(v) && Object.prototype.hasOwnProperty.call(v, 'value'))
+                    v = v.value;
+                if (k.charAt(0) === '$') next[k.slice(1)] = v;
+                else if (v && typeof v === 'object' && !Array.isArray(v)) {
+                    Object.keys(v).forEach(function(fk) {
+                        var fv = v[fk];
+                        if (fv && typeof fv === 'object' && Object.prototype.hasOwnProperty.call(fv, 'value')) fv = fv.value;
+                        next[fk] = fv;
+                    });
+                } else next[k] = v;
+            });
+            this.fieldValues = next;
+        },
+        onOpenUiError: function(errors) {
+            if (!errors || !errors.length) return;
+            var critical = errors.filter(function(e) {
+                return e && (e.code === 'unknown-component' || e.code === 'parse-exception' || e.code === 'parse-failed');
+            });
+            if (critical.length)
+                assistNotify(critical[0].message || 'OpenUI parse error', 'warning');
+        },
+        onOpenUiAction: function(ev) {
+            if (!ev) return;
+            if (ev.formState) this.onOpenUiState(ev.formState);
+            var type = ev.type;
+            if (type === 'open_url') {
+                var url = ev.params && ev.params.url;
+                var Nav = window.AssistOpenUiNav;
+                var built = Nav && Nav.build ? Nav.build(url, null, null, {
+                    appRoot: (this.$root && this.$root.appRootPath) || '',
+                    getLinkPath: this.$root && this.$root.getLinkPath && this.$root.getLinkPath.bind(this.$root),
+                    rewriteShell: true
+                }) : null;
+                if (built && built.href) window.open(built.href, '_blank', 'noopener,noreferrer');
+                else if (!built && url && url.charAt(0) === '/' && url.indexOf('://') < 0 && url.indexOf('//') !== 0
+                        && url.indexOf('..') < 0)
+                    window.open(((this.$root && this.$root.appRootPath) || '') + url, '_blank', 'noopener,noreferrer');
+                return;
+            }
+            if (type === 'submit' || type === 'continue_conversation') {
+                if (ev.humanFriendlyMessage && type === 'continue_conversation' && this.pendingToolCalls.length)
+                    this.resumeChat(ev.humanFriendlyMessage);
+                else this.submitCanvas(this.primaryId);
+            }
+        },
+        applyOpenUiDelta: function(argumentsSoFar) {
+            var lang = extractOpenUiLang(argumentsSoFar);
+            if (!lang) return;
+            if (!this.schema || this.schema.kind === 'openui' || !this.schema.kind) {
+                var next = Object.assign({}, this.schema || {}, { kind: 'openui', lang: lang });
+                this.schema = next;
+                this.loadOpenUi();
+            }
+        },
+        loadVueSfc: function(schema) {
+            var vm = this;
+            var text = assembleSfc(schema);
+            if (!text || text.toLowerCase().indexOf('<template') < 0) {
+                this.vueSfcGen = (this.vueSfcGen || 0) + 1;
+                if (!this.vueSfcComp) this.vueSfcFailed = true;
+                if (schema && schema.sfcError) assistNotify(schema.sfcError, 'error');
+                return;
+            }
+            var key = hashString(text);
+            if (key === this.vueSfcKey && this.vueSfcComp) { this.vueSfcFailed = false; return; }
+            if (typeof httpVueLoader === 'undefined' || !httpVueLoader.parse) {
+                assistNotify('Generated screen failed to compile: httpVueLoader is not available', 'error');
+                if (!this.vueSfcComp) this.vueSfcFailed = true;
+                return;
+            }
+            this.vueSfcFailed = false;
+            this.vueSfcGen = (this.vueSfcGen || 0) + 1;
+            var gen = this.vueSfcGen;
+            var parsed;
+            try { parsed = httpVueLoader.parse(text, ''); }
+            catch (e) {
+                assistNotify('Generated screen failed to compile: ' + ((e && e.message) || String(e)), 'error');
+                if (!this.vueSfcComp) this.vueSfcFailed = true;
+                return;
+            }
+            Promise.resolve(typeof parsed === 'function' ? parsed() : parsed).then(function(comp) {
+                if (gen !== vm.vueSfcGen) return;
+                if (!comp || !comp.template) {
+                    assistNotify('Generated screen failed to compile: missing template', 'error');
+                    if (!vm.vueSfcComp) vm.vueSfcFailed = true;
+                    return;
+                }
+                vm.vueSfcComp = ensureSfcProps(comp);
+                vm.vueSfcKey = key;
+                vm.vueSfcFailed = false;
+            }).catch(function(err) {
+                if (gen !== vm.vueSfcGen) return;
+                assistNotify('Generated screen failed to compile: ' + ((err && err.message) || String(err)), 'error');
+                if (!vm.vueSfcComp) vm.vueSfcFailed = true;
+            });
+        },
+        onSfcInput: function(payload) {
+            if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) return;
+            if (payload.name != null && Object.prototype.hasOwnProperty.call(payload, 'value')
+                    && Object.keys(payload).length <= 3)
+                this.onFieldInput(payload.name, payload.value);
+            else {
+                var vm = this;
+                Object.keys(payload).forEach(function(k) {
+                    if (k === 'name' || k === 'button') return;
+                    vm.onFieldInput(k, payload[k]);
+                });
+                if (payload.name != null && payload.value !== undefined && !Object.prototype.hasOwnProperty.call(payload, payload.name))
+                    this.onFieldInput(payload.name, payload.value);
+            }
+        },
+        onSfcSubmit: function(payload) {
+            var button = this.primaryId;
+            if (payload && typeof payload === 'object') {
+                if (payload.button) button = payload.button;
+                if (payload.values && typeof payload.values === 'object') this.onSfcInput(payload.values);
+                else if (payload.name != null && Object.prototype.hasOwnProperty.call(payload, 'value'))
+                    this.onSfcInput(payload);
+            }
+            this.submitCanvas(button);
+        },
+        onFieldInput: function(name, value) {
+            this.$set(this.fieldValues, name, value);
+            this.$set(this.dirtyFields, name, true);
+        },
+        submitCanvas: function(buttonId) {
+            if (this.streaming) return;
+            if (this.writeMode === 'script' && !this.canSubmitScript) {
+                assistNotify('No scripted actions on this screen. Switch to Agent or wait for actions.', 'warning');
+                return;
+            }
+            var vm = this;
+            assistNotify(this.writeMode === 'script'
+                ? 'Running listed actions…' : 'Submitted — Assist is working…', 'info');
+            if (this.writeMode === 'script') {
+                this.runScriptActions().then(function(actionResults) {
+                    assistNotify('Actions finished; Assist is reviewing results…', 'info');
+                    vm.finishSubmit(buttonId, actionResults);
+                }).catch(function(err) {
+                    assistNotify((err && err.message) || String(err), 'error');
+                    vm.finishSubmit(buttonId, err.actionResults || []);
+                });
+            } else {
+                this.finishSubmit(buttonId, []);
+            }
+        },
+        finishSubmit: function(buttonId, actionResults) {
+            var pending = this.pendingToolCalls[0];
+            if (!pending || !this.conversationId) {
+                assistNotify('Nothing to submit (no yielded form).', 'warning');
+                return;
+            }
+            var content = this.writeUiResult(true, buttonId);
+            content.actionResults = actionResults || [];
+            var body = { profile: 'assist', tools: this.toolNames(), stream: true,
+                forceSkillUse: !!this.forceSkillUse,
+                toolResults: [{ id: pending.id, name: pending.name || 'write_ui', content: content }] };
+            this.runSse(this.llmBase + '/chat/' + encodeURIComponent(this.conversationId) + '/resume', body);
+        },
+        runScriptActions: function() {
+            var vm = this;
+            var actions = (this.schema && this.schema.actions) || [];
+            var bag = Object.assign({}, this.fieldValues);
+            var results = [];
+            var failed = {};
+            function next(i) {
+                if (i >= actions.length) return Promise.resolve(results);
+                var act = actions[i] || {};
+                var deps = act.dependsOn || [];
+                for (var d = 0; d < deps.length; d++) {
+                    if (failed[deps[d]]) {
+                        results.push({ id: act.id, skipped: true, reason: 'dependency failed: ' + deps[d] });
+                        return next(i + 1);
+                    }
+                }
+                var pathErr = validateActionPath(act.path);
+                if (pathErr) {
+                    failed[act.id] = true;
+                    results.push({ id: act.id, error: pathErr });
+                    return Promise.reject({ message: pathErr, actionResults: results });
+                }
+                var path = subst(act.path, bag);
+                var method = (act.method || 'POST').toUpperCase();
+                var bodyObj = {};
+                var keys = act.bodyFromFields || Object.keys(vm.fieldValues);
+                for (var k = 0; k < keys.length; k++) {
+                    var key = keys[k];
+                    if (bag[key] != null) bodyObj[key] = bag[key];
+                }
+                var bind = act.bind || [];
+                for (var b = 0; b < bind.length; b++) if (bag[bind[b]] != null) bodyObj[bind[b]] = bag[bind[b]];
+                var url = ((vm.$root && vm.$root.appRootPath) || '') + path;
+                var init = { method: method, credentials: 'same-origin',
+                    headers: { 'Accept': 'application/json', 'X-CSRF-Token': vm.csrf } };
+                if (method !== 'GET' && method !== 'HEAD') {
+                    init.headers['Content-Type'] = 'application/json';
+                    init.body = JSON.stringify(bodyObj);
+                } else {
+                    var q = [];
+                    var qf = act.queryFromFields;
+                    if (!qf || !qf.length) qf = Object.keys(vm.fieldValues);
+                    for (var qi = 0; qi < qf.length; qi++) {
+                        var qk = qf[qi];
+                        if (bag[qk] != null && bag[qk] !== '') q.push(encodeURIComponent(qk) + '=' + encodeURIComponent(bag[qk]));
+                    }
+                    if (q.length) url += (url.indexOf('?') >= 0 ? '&' : '?') + q.join('&');
+                }
+                return fetch(url, init).then(function(r) {
+                    return r.text().then(function(txt) {
+                        var ct = r.headers && r.headers.get ? r.headers.get('Content-Type') : null;
+                        if (isHtmlBody(txt, ct)) {
+                            failed[act.id] = true;
+                            results.push({ id: act.id, status: r.status, error: HTML_ACTION_ERROR });
+                            var htmlErr = new Error((act.label || act.id) + ' returned HTML, not JSON');
+                            htmlErr.actionResults = results;
+                            throw htmlErr;
+                        }
+                        var parsed = txt;
+                        try { parsed = JSON.parse(txt); } catch (e) { /* keep */ }
+                        var row = { id: act.id, status: r.status, body: parsed };
+                        results.push(row);
+                        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                            Object.keys(parsed).forEach(function(pk) { bag[pk] = parsed[pk]; });
+                        }
+                        if (r.status >= 400) {
+                            failed[act.id] = true;
+                            var err = new Error((act.label || act.id) + ' failed: ' + r.status);
+                            err.actionResults = results;
+                            throw err;
+                        }
+                        return next(i + 1);
+                    });
+                });
+            }
+            return next(0);
+        },
+        runSse: function(url, body) {
+            var vm = this;
+            this.streaming = true;
+            this.abortCtl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+            var assistant = { role: 'assistant', content: '' };
+            this.messages.push(assistant);
+            fetch(url, {
+                method: 'POST', credentials: 'same-origin',
+                headers: this.headers(true),
+                body: JSON.stringify(body),
+                signal: this.abortCtl ? this.abortCtl.signal : undefined
+            }).then(function(resp) {
+                if (!resp.ok && resp.status !== 200) {
+                    return resp.json().catch(function() { return {}; }).then(function(err) {
+                        throw new Error(err.message || ('HTTP ' + resp.status));
+                    });
+                }
+                if (!resp.body || !resp.body.getReader) {
+                    return resp.json().then(function(j) { vm.handleJsonTurn(j, assistant); });
+                }
+                var reader = resp.body.getReader();
+                var decoder = new TextDecoder('utf-8');
+                var buf = '';
+                function pump() {
+                    return reader.read().then(function(chunk) {
+                        if (chunk.done) { vm.streaming = false; return; }
+                        buf += decoder.decode(chunk.value, { stream: true });
+                        buf = parseSseChunk(buf, function(event, data) { vm.onSse(event, data, assistant); });
+                        return pump();
+                    });
+                }
+                return pump();
+            }).catch(function(err) {
+                vm.streaming = false;
+                if (err && err.name === 'AbortError') return;
+                var msg = (err && err.message) || String(err);
+                assistNotify(msg, 'warning');
+                assistant.content = assistant.content || msg;
+            });
+        },
+        onSse: function(event, data, assistant) {
+            if (event === 'conversation' && data && data.conversationId) {
+                var first = !this.conversationId;
+                this.conversationId = data.conversationId;
+                if (first) this.maybeTitle();
+            } else if (event === 'delta' && data && data.content) {
+                assistant.content = (assistant.content || '') + data.content;
+            } else if (event === 'write_ui_delta') {
+                this.applyOpenUiDelta(data && data.arguments);
+            } else if (event === 'tool_call') {
+                this.messages.push({ role: 'tool', kind: 'call', name: data && data.name,
+                    arguments: data && data.arguments, summary: data && data.summary });
+            } else if (event === 'tool_result') {
+                this.messages.push({ role: 'tool', kind: 'result', name: data && data.name,
+                    content: data && data.content, summary: data && data.summary });
+            } else if (event === 'yield') {
+                this.pendingToolCalls = (data && data.pendingToolCalls) || [];
+                var call = this.pendingToolCalls[0];
+                var args = call && call.arguments;
+                if (typeof args === 'string') { try { args = JSON.parse(args); } catch (e) { args = null; } }
+                if (isWriteUiArgs(args)) this.applyYield(args);
+                // FUTURE: args.kind === 'screen-xml' → POST to a compile/render transition (server round-trip)
+                this.streaming = false;
+            } else if (event === 'done') {
+                this.streaming = false;
+                if (data && !data.yielded) this.pendingToolCalls = [];
+                var doneLine = formatDoneLine(data);
+                if (doneLine) this.messages.push({ role: 'done', content: doneLine });
+            } else if (event === 'error') {
+                this.streaming = false;
+                assistNotify((data && data.message) || 'LLM error', 'warning');
+            }
+        },
+        handleJsonTurn: function(j, assistant) {
+            this.streaming = false;
+            if (j.conversationId) this.conversationId = j.conversationId;
+            if (j.content) assistant.content = j.content;
+            if (j.yielded && j.pendingToolCalls) {
+                this.pendingToolCalls = j.pendingToolCalls;
+                var call = this.pendingToolCalls[0];
+                var args = call && call.arguments;
+                if (typeof args === 'string') { try { args = JSON.parse(args); } catch (e) { args = null; } }
+                if (isWriteUiArgs(args)) this.applyYield(args);
+            }
+            var doneLine = formatDoneLine(j);
+            if (doneLine) this.messages.push({ role: 'done', content: doneLine });
+        },
+        maybeTitle: function() {
+            if (!this.conversationId) return;
+            var first = this.messages.filter(function(m) { return m.role === 'user'; })[0];
+            if (!first || !first.content) return;
+            var title = first.content.length > 80 ? first.content.slice(0, 77) + '...' : first.content;
+            $.ajax({ type: 'POST', url: 'setTitle', dataType: 'json',
+                data: { moquiSessionToken: this.csrf, conversationId: this.conversationId, title: title } });
+        },
+        cancelTurn: function() {
+            if (this.abortCtl) try { this.abortCtl.abort(); } catch (e) { /* ignore */ }
+            this.streaming = false;
+            if (!this.conversationId) return;
+            fetch(this.llmBase + '/chat/' + encodeURIComponent(this.conversationId) + '/cancel', {
+                method: 'POST', credentials: 'same-origin',
+                headers: this.headers(false), body: '{}'
+            }).catch(function() { /* ignore */ });
+        },
+        setupSpeech: function() {
+            var Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+            this.speechSupported = !!Rec;
+            if (!Rec) return;
+            var rec = new Rec();
+            rec.lang = (navigator.language || 'en-US');
+            rec.interimResults = false;
+            var vm = this;
+            rec.onresult = function(ev) {
+                var t = ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript;
+                if (t) vm.composer = (vm.composer ? vm.composer + ' ' : '') + t;
+            };
+            rec.onend = function() { vm.recognizing = false; };
+            this.recognition = rec;
+        },
+        toggleMic: function() {
+            if (!this.recognition) return;
+            if (this.recognizing) { this.recognition.stop(); this.recognizing = false; }
+            else { this.recognition.start(); this.recognizing = true; }
+        },
+        widgetComponent: function(widget) {
+            if (widget === 'text-area') return 'q-input';
+            if (widget === 'drop-down') return 'q-select';
+            if (widget === 'date-time') return 'm-date-time';
+            if (widget === 'display' || widget === 'display-entity') return 'div';
+            return 'm-text-line';
+        },
+        toolSummary: function(m) {
+            if (!m) return '';
+            if (m.summary) return m.summary;
+            if (m.kind === 'call') return formatArgsFallback(m.name, m.arguments);
+            if (m.kind === 'result') return formatResultFallback(m.name, m.content);
+            return '';
+        }
+    },
+    mounted: function() {
+        this.canvasId = 'c' + Date.now();
+        this.loadPrefs();
+        this.loadProfiles();
+        this.loadConversations();
+        this.setupSpeech();
+    },
+    beforeDestroy: function() {
+        this.cancelTurn();
+        if (this.recognition && this.recognizing) try { this.recognition.stop(); } catch (e) { /* ignore */ }
+    }
+};
+</script>
+<style>
+.assist-root { min-height: 60vh; }
+.assist-pane { height: 100%; overflow: hidden; }
+.assist-chat { border-right: 1px solid rgba(0,0,0,0.08); }
+</style>
