@@ -9,10 +9,15 @@
     <default-property name="webapp_allow_origins" value="*"/>
     <default-property name="entity_empty_db_load" value="all"/>
     <default-property name="entity_lock_track" value="true"/>
+    
+    <default-property name="a2a_enabled" value="true"/>
 
     <!-- Local LM Studio (OpenAI-compatible) for Assist / LlmClient testing -->
-    <default-property name="llm_openai_url" value="http://127.0.0.1:1234"/>
-    <default-property name="llm_openai_model" value=""/>
+    <default-property name="llm_openai_url" value="http://127.0.0.1:11434"/>
+    <default-property name="llm_openai_model" value="qwen3:8b"/>
+    <default-property name="llm_openai_api_key" value="sk-..." is-secret="true"/>
+
+
     <llm-facade>
         <!-- For the assist profile timeout-seconds and max-iterations need to be somewhat high for skill learning R&D loops -->
         <profile name="assist" timeout-seconds="900" max-iterations="32"/>
@@ -29,7 +34,38 @@
     <default-property name="entity_ds_user" value="moqui"/>
     <default-property name="entity_ds_password" value="moqui"/>
     -->
+    <default-property name="entity_ds_db_conf" value="postgres"/>
+    <default-property name="entity_ds_host" value="127.0.0.1"/>
+    <default-property name="entity_ds_port" value="5432"/>
+    <default-property name="entity_ds_database" value="moqui"/>
+    <default-property name="entity_ds_schema" value="public"/>
+    <default-property name="entity_ds_user" value="moqui"/>
+    <default-property name="entity_ds_password" value="moqui"/>
 
+    <!-- Local only: component MoquiConf has no hmacSecret default. Empty = Office preview unavailable. -->
+    <default-property name="collie.drive.preview.hmacSecret" value="collie-drive-dev-hmac-change-me" is-secret="true"/>
+
+    <!-- Optional S3 (compose-zh RustFS). Leave content.root as dbresource if the endpoint is down. -->
+    <default-property name="AWS_REGION" value="us-east-1"/>
+    <default-property name="AWS_ACCESS_KEY_ID" value="colliedrive"/>
+    <default-property name="AWS_SECRET_ACCESS_KEY" value="colliedrive-dev" is-secret="true"/>
+    <default-property name="AWS_ENDPOINT_URL" value="http://127.0.0.1:9000"/>
+    <default-property name="collie.drive.content.root" value="aws3://collie-drive"/>
+
+    <default-property name="elasticsearch_url" value="https://127.0.0.1:9200"/>
+    <default-property name="elasticsearch_user" value="admin"/>
+    <default-property name="elasticsearch_password" value="MoquiElasticChangeMe@2026"/>
+    <default-property name="elasticsearch_index_prefix" value="default_"/>   
+
+    <!-- LLM Client settings (env vars / Java properties; see ReleaseNotes.md). url may be an origin
+         (default path /v1/chat/completions is appended) or a full chat/completions URL (Azure).
+         Blank api-key omits the auth header (Ollama). model is empty — set llm_openai_model. -->
+    <default-property name="llm_openai_url" value="https://api.siliconflow.cn"/>
+    <default-property name="llm_openai_api_key" value="sk-ihfypwacnzjpnbfywmgdasgcgdniwjfftrqmseudqvlmgant" is-secret="true"/>
+    <default-property name="llm_openai_model" value="deepseek-ai/DeepSeek-V4-Flash"/>
+    <default-property name="llm_log_content" value="true"/>
+
+    
     <cache-list warm-on-start="false">
         <!-- Development Mode - expires artifact cache entries; don't use these for production, load testing, etc -->
         <cache name="entity.definition" expire-time-idle="30"/>

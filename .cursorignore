@@ -1,0 +1,10 @@
+# runtime .gitignore hides /component as separate checkouts.
+!/component/
+!/component/**
+
+# Generated
+/log/
+/db/
+/sessions/
+/txlog/
+/tmp/
