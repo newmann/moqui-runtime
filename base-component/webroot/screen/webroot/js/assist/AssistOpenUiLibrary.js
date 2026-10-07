@@ -2,16 +2,12 @@
 (function(root) {
     'use strict';
 
-    var CHART_JS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.3/Chart.min.js';
-    var MERMAID_URL = 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/9.3.0/mermaid.min.js';
-    var MARKED_URL = 'https://cdnjs.cloudflare.com/ajax/libs/marked/18.0.10/lib/marked.umd.min.js';
-    var PURIFY_URL = 'https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.4.14/purify.min.js';
-    var HLJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.2/highlight.min.js';
-    var HLJS_CSS = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.2/styles/github-dark.min.css';
-    var MARKED_SRI = 'sha512-BXBF2VjQU8N1VwZXChMTvB49voK+BRHl8NnXMXbda1RQ5nguKxDl8406wy6opMqBoGuPIDm2mD+Db37I3CuM8A==';
-    var PURIFY_SRI = 'sha512-+G1tsz5n01KTeX7oUT/Lm5P2B+n9RUogC98t4E8MseH9YUac2D2uPaNSbsYDOOSZr2YQ1BfeCxk8KXZXvhctEA==';
-    var HLJS_SRI = 'sha512-VSPLUv/n1Bmn+4zoxBNwpuFAO3//79I0Aax/qHDx24R47vylPcc9PrHDCqlePwHnh3joiM7/YTQhcXyQAAxvPQ==';
-    var HLJS_CSS_SRI = 'sha512-rO+olRTkcf304DQBxSWxln8JXCzTHlKnIdnMUwYvQa9/Jd4cQaNkItIUj6Z4nvW1dqK0SKXLbn9h4KwZTNtAyw==';
+    var CHART_JS_URL = '/libs/Chart.js/Chart.min.js';
+    var MERMAID_URL = '/libs/mermaid/mermaid.min.js';
+    var MARKED_URL = '/libs/marked/marked.umd.min.js';
+    var PURIFY_URL = '/libs/dompurify/purify.min.js';
+    var HLJS_URL = '/libs/highlight.js/highlight.min.js';
+    var HLJS_CSS = '/libs/highlight.js/styles/github-dark.min.css';
     var CHART_COLORS = ['#1976d2', '#26a69a', '#9c27b0', '#ef6c00', '#c62828', '#546e7a', '#7cb342', '#f9a825'];
     var CHART_MAX_SERIES = 8;
     var CHART_MAX_POINTS = 200;
@@ -34,6 +30,70 @@
     }
     function truthy(v) {
         return v === true || v === 'true' || v === 'wrap' || v === 1 || v === '1';
+    }
+    function assistDateKind(type) {
+        return (type === 'date' || type === 'time') ? type : 'date-time';
+    }
+    function assistDateMatches(text, kind) {
+        if (kind === 'date') return /^\d{4}-\d{2}-\d{2}$/.test(text);
+        if (kind === 'time') return /^\d{2}:\d{2}$/.test(text);
+        return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(text);
+    }
+    function assistPad(n) { return (n < 10 ? '0' : '') + n; }
+    function assistFormatDateMs(ms, kind) {
+        var d = new Date(ms);
+        if (isNaN(d.getTime())) return '';
+        if (kind === 'time') return assistPad(d.getHours()) + ':' + assistPad(d.getMinutes());
+        var day = d.getFullYear() + '-' + assistPad(d.getMonth() + 1) + '-' + assistPad(d.getDate());
+        if (kind === 'date') return day;
+        return day + ' ' + assistPad(d.getHours()) + ':' + assistPad(d.getMinutes());
+    }
+    function assistEpochMillis(text) {
+        if (!/^-?\d{10,13}$/.test(text)) return null;
+        var n = Number(text);
+        if (!isFinite(n)) return null;
+        var abs = Math.abs(n);
+        if (abs >= 100000000000) return n;
+        if (abs >= 1000000000) return n * 1000;
+        return null;
+    }
+    function assistParseDateText(text) {
+        var m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(text);
+        if (m) {
+            var d = new Date(+m[1], +m[2] - 1, +m[3], m[4] != null ? +m[4] : 0, m[5] != null ? +m[5] : 0, m[6] != null ? +m[6] : 0);
+            if (!isNaN(d.getTime())) return d.getTime();
+        }
+        var t = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(text);
+        if (t) {
+            var clock = new Date();
+            clock.setHours(+t[1], +t[2], t[3] != null ? +t[3] : 0, 0);
+            return clock.getTime();
+        }
+        if (text.indexOf('T') > 0 || /Z$|[+-]\d{2}:\d{2}$/.test(text)) {
+            var p = Date.parse(text);
+            if (!isNaN(p)) return p;
+        }
+        return null;
+    }
+    /** m-date-time mask is YYYY-MM-DD HH:mm. Epoch millis/seconds and now become that string in the browser zone. */
+    function assistFormatDateValue(value, type) {
+        if (value == null || value === '') return '';
+        if (typeof value === 'object') return '';
+        var kind = assistDateKind(type);
+        var text = String(value).trim();
+        if (text.toLowerCase() === 'now') return assistFormatDateMs(Date.now(), kind);
+        if (assistDateMatches(text, kind)) return text;
+        var ms = assistEpochMillis(text);
+        if (ms == null) ms = assistParseDateText(text);
+        if (ms == null) return text;
+        return assistFormatDateMs(ms, kind);
+    }
+    /** Vue 2 mustache JSON.stringifies plain objects, which dumps an unevaluated OpenUI AST onto the canvas. */
+    function formatOpenUiText(v) {
+        if (v == null) return '';
+        var t = typeof v;
+        if (t === 'string' || t === 'number' || t === 'boolean') return String(v);
+        return '';
     }
     function asNumbers(arr) {
         return asArray(arr).slice(0, CHART_MAX_POINTS).map(function(v) {
@@ -65,11 +125,23 @@
         if (path == null || path === '') return 'path required';
         path = String(path);
         if (path.charAt(0) !== '/') return 'path must start with /';
+        if (/[\s\\\u0000-\u001f]/.test(path)) return 'path must not contain whitespace or backslash';
         if (path.indexOf('://') >= 0 || path.indexOf('//') === 0) return 'path must not contain a host';
-        if (path.indexOf('..') >= 0) return 'path must not contain ..';
-        var lower = path.toLowerCase();
+        var decoded = path;
+        try { decoded = decodeURIComponent(path); } catch (e) { return 'path is not a valid URL'; }
+        if (decoded.indexOf('..') >= 0 || decoded.indexOf('\\') >= 0 || /[\s\u0000-\u001f]/.test(decoded))
+            return 'path must not contain ..';
+        var lower = decoded.toLowerCase();
         if (lower.indexOf('javascript:') >= 0 || lower.indexOf('data:') >= 0 || lower.indexOf('mailto:') >= 0)
             return 'path scheme not allowed';
+        if (typeof URL !== 'undefined' && typeof location !== 'undefined' && location.origin) {
+            try {
+                var url = new URL(path, location.origin);
+                if (url.origin !== location.origin) return 'path must stay on this origin';
+            } catch (e2) {
+                return 'path is not a valid URL';
+            }
+        }
         return null;
     }
     function validateNavHash(hash) {
@@ -241,9 +313,12 @@
                 var t = (this.props && this.props.type) || 'date-time';
                 if (t === 'date' || t === 'time' || t === 'date-time') return t;
                 return 'date-time';
+            },
+            displayValue: function() {
+                return assistFormatDateValue(this.fieldValue, this.dateType);
             }
         },
-        template: '<m-date-time :name="fieldName || \'dt\'" :label="fieldLabel" :type="dateType" :value="fieldValue" @input="onFieldInput"></m-date-time>'
+        template: '<m-date-time :name="fieldName || \'dt\'" :label="fieldLabel" :type="dateType" :value="displayValue" @input="onFieldInput"></m-date-time>'
     };
     var Lookup = {
         mixins: [fieldMixin('Lookup')],
@@ -263,9 +338,15 @@
                     return o;
                 }
                 return undefined;
+            },
+            safeOptionsUrl: function() {
+                var url = this.props && this.props.optionsUrl;
+                if (url == null || url === '') return '';
+                if (validateNavPath(String(url)) != null) return '';
+                return String(url);
             }
         },
-        template: '<m-drop-down dense outlined :label="fieldLabel" :value="fieldValue" :name="fieldName" :options-url="props&&props.optionsUrl" :value-field="(props&&props.valueField)||\'value\'" :label-field="(props&&props.labelField)||\'label\'" :server-search="true" :depends-on="dependsOnObj" :fields="lookupFields" @input="onFieldInput"></m-drop-down>'
+        template: '<m-drop-down dense outlined :label="fieldLabel" :value="fieldValue" :name="fieldName" :options-url="safeOptionsUrl" :value-field="(props&&props.valueField)||\'value\'" :label-field="(props&&props.labelField)||\'label\'" :server-search="true" :depends-on="dependsOnObj" :fields="lookupFields" @input="onFieldInput"></m-drop-down>'
     };
     function optionItems(propItems) {
         return asArray(propItems).map(function(it) {
@@ -471,14 +552,14 @@
         });
     }
     function loadMarkdownStack(cb) {
-        loadAssistCss(HLJS_CSS, HLJS_CSS_SRI);
+        loadAssistCss(HLJS_CSS);
         loadAssistScript(MARKED_URL, function() { return !!(window.marked && window.marked.parse); }, function(err) {
             if (err) { cb(err); return; }
             loadAssistScript(PURIFY_URL, function() { return !!(window.DOMPurify && window.DOMPurify.sanitize); }, function(err2) {
                 if (err2) { cb(err2); return; }
-                loadAssistScript(HLJS_URL, function() { return !!(window.hljs && window.hljs.highlightElement); }, cb, HLJS_SRI);
-            }, PURIFY_SRI);
-        }, MARKED_SRI);
+                loadAssistScript(HLJS_URL, function() { return !!(window.hljs && window.hljs.highlightElement); }, cb);
+            });
+        });
     }
     function rewriteMdLinks(container) {
         var as = container.querySelectorAll('a[href]');
@@ -549,9 +630,9 @@
             render: function(h) {
                 var p = this.props || {};
                 var dir = p.direction === 'row' ? 'row' : 'column';
-                var gap = p.gap === 's' ? 'q-gutter-sm' : (p.gap === 'l' ? 'q-gutter-lg' : 'q-gutter-md');
+                var gap = p.gap === 's' ? '8px' : (p.gap === 'l' ? '24px' : '16px');
                 var wrap = truthy(p.wrap) ? ' wrap' : '';
-                return h('div', { class: dir + ' ' + gap + wrap }, this.renderNode(p.children));
+                return h('div', { class: dir + wrap, style: { gap: gap } }, this.renderNode(p.children));
             }
         },
         Card: {
@@ -575,9 +656,10 @@
                     if (s === 'small') return 'text-caption';
                     if (s === 'large' || s === 'large-heavy') return 'text-h4';
                     return 'text-body1';
-                }
+                },
+                textValue: function() { return formatOpenUiText(this.props && this.props.text); }
             },
-            template: '<div :class="sizeClass" style="white-space:pre-wrap">{{props && props.text}}</div>'
+            template: '<div :class="sizeClass" style="white-space:pre-wrap">{{textValue}}</div>'
         },
         Callout: {
             props: ['props', 'renderNode'],
@@ -586,9 +668,10 @@
                     var t = (this.props && this.props.type) || 'info';
                     if (t === 'warning' || t === 'negative' || t === 'positive' || t === 'info') return 'bg-' + t + ' text-white';
                     return 'bg-info text-white';
-                }
+                },
+                textValue: function() { return formatOpenUiText(this.props && this.props.text); }
             },
-            template: '<q-banner dense class="q-mb-sm" :class="bannerClass">{{props && props.text}}</q-banner>'
+            template: '<q-banner dense class="q-mb-sm" :class="bannerClass">{{textValue}}</q-banner>'
         },
         Separator: {
             props: ['props', 'renderNode'],
@@ -692,7 +775,7 @@
                 var submit = p.submit ? this.renderNode(p.submit) : null;
                 var body = kids;
                 if (submit) body = kids.concat([h('div', { class: 'q-mt-md' }, asArray(submit))]);
-                return h('div', { class: 'column q-gutter-sm' }, body);
+                return h('div', { class: 'column', style: { gap: '8px' } }, body);
             }
         },
         FormControl: {
@@ -723,10 +806,14 @@
         },
         Stat: {
             props: ['props', 'renderNode'],
+            computed: {
+                statValue: function() { return formatOpenUiText(this.props && this.props.value); },
+                statCaption: function() { return formatOpenUiText(this.props && this.props.caption); }
+            },
             template: '<q-card flat bordered class="q-pa-md">' +
                 '<div class="text-caption text-grey-7">{{props && props.label}}</div>' +
-                '<div class="text-h4">{{props && props.value}}</div>' +
-                '<div v-if="props && props.caption" class="text-caption">{{props.caption}}</div></q-card>'
+                '<div class="text-h4">{{statValue}}</div>' +
+                '<div v-if="statCaption" class="text-caption">{{statCaption}}</div></q-card>'
         },
         Tag: {
             props: ['props', 'renderNode'],
@@ -892,11 +979,11 @@
                 highlight: function() {
                     var el = this.$refs.code;
                     if (!el) return;
-                    loadAssistCss(HLJS_CSS, HLJS_CSS_SRI);
+                    loadAssistCss(HLJS_CSS);
                     loadAssistScript(HLJS_URL, function() { return !!(window.hljs && window.hljs.highlightElement); }, function(err) {
                         if (err || !window.hljs) return;
                         try { window.hljs.highlightElement(el); } catch (e) { /* ignore */ }
-                    }, HLJS_SRI);
+                    });
                 }
             },
             template: '<pre class="q-pa-sm bg-grey-9 text-white" style="overflow:auto"><code ref="code" :class="(props&&props.language)||\'\'">{{props && props.code}}</code></pre>'
@@ -938,7 +1025,7 @@
         Buttons: {
             props: ['props', 'renderNode'],
             render: function(h) {
-                return h('div', { class: 'q-gutter-sm' }, this.renderNode(this.props && this.props.children));
+                return h('div', { class: 'row', style: { gap: '8px' } }, this.renderNode(this.props && this.props.children));
             }
         },
         Tabs: {
@@ -995,5 +1082,6 @@
     }
 
     root.AssistOpenUiLibrary = library;
+    root.assistFormatDateValue = assistFormatDateValue;
     root.loadAssistOpenUiSpec = loadSpec;
 })(typeof window !== 'undefined' ? window : this);
